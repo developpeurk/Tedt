@@ -1,0 +1,79 @@
+@ExtendWith(MockitoExtension.class)
+class RequestArchiverTest {
+
+  @Mock UpdateStateOthersQueue updateStateOthersQueue;
+  @Mock UpdateStateCancelledQueue updateStateCancelledQueue;
+  @Mock PlanetReqRepository planetReqRepository;
+  @Captor ArgumentCaptor<PlanetReq> reqCaptor;
+
+  @InjectMocks RequestArchiver requestArchiver;
+
+  @Test
+  void fetchAndQueue_pushes_both_kinds_to_their_queues() {
+    // Arrange
+    var canceled = new PlanetReq(); canceled.setId("c1");
+    var other    = new PlanetReq(); other.setId("o1");
+
+    when(planetReqRepository.retrieveRequestsCanceledToAnalyseAndArchive())
+        .thenReturn(List.of(canceled));
+    when(planetReqRepository.retrieveOthersRequestsToAnalyseAndArchive())
+        .thenReturn(List.of(other));
+    when(planetReqRepository.findById(anyString()))
+        .thenAnswer(inv -> Optional.of("c1".equals(inv.getArgument(0)) ? canceled : other));
+
+    // Act
+    requestArchiver.fetchAndQueueRequests();
+
+    // Assert
+    verify(updateStateCancelledQueue).addToUpdateQueue(canceled);
+    verify(updateStateOthersQueue).addToUpdateOthersQueue(other);
+    verify(planetReqRepository, times(2)).save(any(PlanetReq.class));
+    verifyNoMoreInteractions(updateStateCancelledQueue, updateStateOthersQueue, planetReqRepository);
+  }
+
+  @Test
+  void archiveRequests_marks_cancelled_and_saves() {
+    // Arrange
+    var req = new PlanetReq(); req.setId("c1");
+    when(updateStateCancelledQueue.isEmpty()).thenReturn(false, true);
+    when(updateStateCancelledQueue.pollRequest()).thenReturn(req);
+    when(planetReqRepository.findById("c1")).thenReturn(Optional.of(req));
+
+    // Act
+    requestArchiver.archiveRequests();
+
+    // Assert
+    verify(planetReqRepository).save(reqCaptor.capture());
+    assertTrue(reqCaptor.getValue().isArchived());
+  }
+
+  @Test
+  void archiveRequests_handles_missing_entity_gracefully() {
+    when(updateStateOthersQueue.isEmpty()).thenReturn(false, true);
+    var missing = new PlanetReq(); missing.setId("missing");
+    when(updateStateOthersQueue.pollRequest()).thenReturn(missing);
+    when(planetReqRepository.findById("missing")).thenReturn(Optional.empty());
+
+    requestArchiver.archiveRequests();
+
+    verify(planetReqRepository, never()).save(any());
+  }
+
+  @Test
+  void fetchAndQueue_swallows_queue_errors_but_still_saves_flags() {
+    var req = new PlanetReq(); req.setId("err");
+    when(planetReqRepository.retrieveRequestsCanceledToAnalyseAndArchive())
+        .thenReturn(List.of(req));
+    when(planetReqRepository.retrieveOthersRequestsToAnalyseAndArchive())
+        .thenReturn(List.of());
+    // simulate queue error
+    doThrow(new RuntimeException("Queue error"))
+        .when(updateStateCancelledQueue).addToUpdateQueue(req);
+    when(planetReqRepository.findById("err")).thenReturn(Optional.of(req));
+
+    requestArchiver.fetchAndQueueRequests();
+
+    // still persisted, or whatever behavior you expect:
+    verify(planetReqRepository).save(any(PlanetReq.class));
+  }
+}
